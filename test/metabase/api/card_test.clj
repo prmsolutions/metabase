@@ -410,11 +410,11 @@
         (perms/grant-collection-readwrite-permissions! (perms-group/all-users) collection)
         (tu/with-model-cleanup [Card]
           ;; Rebind the `cancellable-run-query` function so that we can capture the generated SQL and inspect it
-          (let [orig-fn    (var-get #'metabase.driver.generic-sql.query-processor/cancellable-run-query)
+          (let [orig-fn    (var-get #'metabase.driver.sql.query-processor/cancellable-run-query)
                 sql-result (atom [])]
-            (with-redefs [metabase.driver.generic-sql.query-processor/cancellable-run-query (fn [db sql params opts]
-                                                                                              (swap! sql-result conj sql)
-                                                                                              (orig-fn db sql params opts))]
+            (with-redefs [metabase.driver.sql.query-processor/cancellable-run-query (fn [db sql params opts]
+                                                                                      (swap! sql-result conj sql)
+                                                                                      (orig-fn db sql params opts))]
               ;; create a card with the metadata
               ((user->client :rasta) :post 200 "card"
                (assoc (card-with-name-and-query card-name)

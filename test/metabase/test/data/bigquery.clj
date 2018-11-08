@@ -2,6 +2,14 @@
   (:require [clj-time
              [coerce :as tcoerce]
              [format :as tformat]]
+                        [metabase.test.data.interface :as tx]
+            [metabase.driver.sql.query-processor :as sql.qp]
+            [metabase.test.data.sql :as sql.tx]
+            [metabase.test.data.sql.ddl :as ddl]
+            [metabase.test.data.sql-jdbc.spec :as spec]
+            [metabase.test.data.sql-jdbc.execute :as execute]
+            [metabase.test.data.sql-jdbc.load-data :as load-data]
+
             [clojure.string :as str]
             [medley.core :as m]
             [metabase.driver
@@ -23,6 +31,8 @@
            java.sql.Time
            metabase.driver.bigquery.BigQueryDriver))
 
+(sql.tx/add-test-extensions! :bigquery)
+
 ;;; ----------------------------------------------- Connection Details -----------------------------------------------
 
 (def ^:private ^String normalize-name (comp (u/rpartial str/replace #"-" "_") name))
@@ -30,7 +40,7 @@
 (def ^:private ^:const details
   (datasets/when-testing-engine :bigquery
     (reduce (fn [acc env-var]
-              (assoc acc env-var (i/db-test-env-var-or-throw :bigquery env-var)))
+              (assoc acc env-var (tx/db-test-env-var-or-throw :bigquery env-var)))
             {} [:project-id :client-id :client-secret :access-token :refresh-token])))
 
 (def ^:private ^:const ^String project-id (:project-id details))
@@ -39,11 +49,8 @@
   (datasets/when-testing-engine :bigquery
     (#'bigquery/database->client {:details details})))
 
-(defn- database->connection-details
-  ([_ {:keys [database-name]}]
-   (database->connection-details database-name))
-  ([database-name]
-   (assoc details :dataset-id (normalize-name database-name))))
+(defmethod tx/database->connection-details :bigquery [_ _ {:keys [database-name]}]
+  (assoc details :dataset-id (normalize-name database-name)))
 
 
 ;;; -------------------------------------------------- Loading Data --------------------------------------------------
@@ -201,40 +208,37 @@
 (def ^:private existing-datasets
   (atom #{}))
 
-(defn- create-db!
-  ([db-def]
-   (create-db! db-def nil))
-  ([{:keys [database-name table-definitions]} _]
-   {:pre [(seq database-name) (sequential? table-definitions)]}
-   ;; fetch existing datasets if we haven't done so yet
-   (when-not (seq @existing-datasets)
-     (reset! existing-datasets (set (existing-dataset-names)))
-     (println "These BigQuery datasets have already been loaded:\n" (u/pprint-to-str (sort @existing-datasets))))
-   ;; now check and see if we need to create the requested one
-   (let [database-name (normalize-name database-name)]
-     (when-not (contains? @existing-datasets database-name)
-       (try
-         (u/auto-retry 10
-           ;; if the dataset failed to load successfully last time around, destroy whatever was loaded so we start
-           ;; again from a blank slate
-           (u/ignore-exceptions
-             (destroy-dataset! database-name))
-           (create-dataset! database-name)
-           ;; do this in parallel because otherwise it can literally take an hour to load something like
-           ;; fifty_one_different_tables
-           (u/pdoseq [tabledef table-definitions]
-             (load-tabledef! database-name tabledef))
-           (swap! existing-datasets conj database-name)
-           (println (u/format-color 'green "[OK]")))
-         ;; if creating the dataset ultimately fails to complete, then delete it so it will hopefully work next time
-         ;; around
-         (catch Throwable e
-           (u/ignore-exceptions
-             (println (u/format-color 'red "Failed to load BigQuery dataset '%s'." database-name))
-             (destroy-dataset! database-name))
-           (throw e)))))))
+(defmethod tx/create-db! :bigquery [_ {:keys [database-name table-definitions]} & _]
+  {:pre [(seq database-name) (sequential? table-definitions)]}
+  ;; fetch existing datasets if we haven't done so yet
+  (when-not (seq @existing-datasets)
+    (reset! existing-datasets (set (existing-dataset-names)))
+    (println "These BigQuery datasets have already been loaded:\n" (u/pprint-to-str (sort @existing-datasets))))
+  ;; now check and see if we need to create the requested one
+  (let [database-name (normalize-name database-name)]
+    (when-not (contains? @existing-datasets database-name)
+      (try
+        (u/auto-retry 10
+                      ;; if the dataset failed to load successfully last time around, destroy whatever was loaded so we start
+                      ;; again from a blank slate
+                      (u/ignore-exceptions
+                       (destroy-dataset! database-name))
+                      (create-dataset! database-name)
+                      ;; do this in parallel because otherwise it can literally take an hour to load something like
+                      ;; fifty_one_different_tables
+                      (u/pdoseq [tabledef table-definitions]
+                                (load-tabledef! database-name tabledef))
+                      (swap! existing-datasets conj database-name)
+                      (println (u/format-color 'green "[OK]")))
+        ;; if creating the dataset ultimately fails to complete, then delete it so it will hopefully work next time
+        ;; around
+        (catch Throwable e
+          (u/ignore-exceptions
+           (println (u/format-color 'red "Failed to load BigQuery dataset '%s'." database-name))
+           (destroy-dataset! database-name))
+          (throw e))))))
 
-(defn aggregate-column-info
+(defmethod tx/aggregate-column-info :bigquery
   ([driver aggregation-type]
    (i/default-aggregate-column-info driver aggregation-type))
   ([driver aggregation-type field]
@@ -244,14 +248,3 @@
     ;; add them as we come across them.
     (when (#{:avg :stddev} aggregation-type)
       {:base_type :type/Float}))))
-
-
-;;; --------------------------------------------- IDriverTestExtensions ----------------------------------------------
-
-(u/strict-extend BigQueryDriver
-  i/IDriverTestExtensions
-  (merge i/IDriverTestExtensionsDefaultsMixin
-         {:engine                       (constantly :bigquery)
-          :database->connection-details (u/drop-first-arg database->connection-details)
-          :create-db!                   (u/drop-first-arg create-db!)
-          :aggregate-column-info        aggregate-column-info}))
