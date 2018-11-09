@@ -4,6 +4,7 @@ import React, { Component } from "react";
 import { connect } from "react-redux";
 import ScrollToTop from "metabase/hoc/ScrollToTop";
 import Navbar from "metabase/nav/containers/Navbar.jsx";
+import Intercom from 'react-intercom';
 
 import UndoListing from "metabase/containers/UndoListing";
 
